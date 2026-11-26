@@ -1,10 +1,11 @@
-import { useThreadActions, useSidebarThreads } from "./bb-sdk";
-import { useRef, useState, type ReactNode } from "react";
+import { BbIcon, THREAD_ACTION_GROUPS as GROUPS, useThreadActions, useSidebarThreads } from "./bb-sdk";
+import { Fragment, useRef, useState, type ReactNode, type RefObject } from "react";
 import * as ContextMenu from "@radix-ui/react-context-menu";
-import { useBbNavigate, useRpc, type PluginSidebarThread } from "@get-bb/plugin-sdk/app";
+import { useBbNavigate, useRpc, type PluginSidebarThread, type PluginThreadActionEntry } from "@get-bb/plugin-sdk/app";
 import { errorDetail, toast } from "./lib/toast";
 import type { threadInboxRpcContract } from "./contract";
 import { ParentThreadMenu } from "./ParentThreadMenu";
+import { ThreadActionChoices } from "./ThreadActionChoices";
 import { notifiesParent, ParentNotificationsMenu } from "./ParentNotificationsMenu";
 import { DeleteThreadDialog } from "./DeleteThreadDialog";
 import { SnoozePickerDialog } from "./SnoozePickerDialog";
@@ -30,14 +31,18 @@ type RowContextMenuProps = {
 /** Keep the plugin's menus, but build their actions and dialogs only on first open. */
 export function RowContextMenu({ children, ...props }: RowContextMenuProps) {
   const [activated, setActivated] = useState(false);
+  // True from opening until the menu has handed focus back.
+  const shown = useRef(false);
   return (
     <ContextMenu.Root
       onOpenChange={(open) => {
-        if (open) setActivated(true);
+        if (!open) return;
+        shown.current = true;
+        setActivated(true);
       }}
     >
       <ContextMenu.Trigger asChild>{children}</ContextMenu.Trigger>
-      {activated ? <RowMenuContents {...props} /> : null}
+      {activated ? <RowMenuContents {...props} shown={shown} /> : null}
     </ContextMenu.Root>
   );
 }
@@ -53,18 +58,18 @@ function RowMenuContents({
   onUnsettle,
   onWake,
   onRename,
-}: Omit<RowContextMenuProps, "children">) {
+  shown,
+}: Omit<RowContextMenuProps, "children"> & { shown: RefObject<boolean> }) {
+  // The rename to start once the menu has released focus.
+  const renameAfterClose = useRef<(() => void) | null>(null);
   const actions = useThreadActions(thread, {
-    keys: [
-      "bb--core/split",
-      "bb--core/copyLink",
-      "bb--core/pin",
-      "bb--core/read",
-      "bb--core/rename",
-      "bb--core/archive",
-    ],
-    requestRename: () => onRename?.(),
+    // A plugin action that renames from the open menu waits for it to release focus.
+    requestRename: () => {
+      if (shown.current) renameAfterClose.current = () => onRename?.();
+      else onRename?.();
+    },
   });
+  const pluginGroups = groupPluginActions(actions);
   const navigate = useBbNavigate();
   // bb 0.46 always supplies pin/read/rename/archive for sidebar rows, and bb
   // 0.49 copyLink. Split is omitted in compact mode and for the focused pane;
@@ -78,7 +83,6 @@ function RowMenuContents({
   const project = projects.find((project) => project.id === thread.projectId);
   const portalScope = usePortalScopeProps();
   const rpc = useRpc<typeof threadInboxRpcContract>();
-  const renameAfterClose = useRef(false);
   const leavingForSettings = useRef(false);
   // Outlives the portaled submenu, which unmounts when a choice closes the menu.
   const pendingNotificationSave = useRef<Promise<void> | null>(null);
@@ -91,7 +95,8 @@ function RowMenuContents({
     onSettle ||
     onUnsettle ||
     onWake ||
-    (canSnooze && onSnooze && snoozePresets.length > 0)
+    (canSnooze && onSnooze && snoozePresets.length > 0) ||
+    pluginGroups.has(GROUPS.state)
   );
   const togglePin = async () => {
     if (thread.isPinned) {
@@ -113,18 +118,22 @@ function RowMenuContents({
           {...portalScope}
           aria-label="Thread actions"
           onCloseAutoFocus={(event) => {
+            shown.current = false;
             if (leavingForSettings.current) event.preventDefault();
             leavingForSettings.current = false;
             // A dialog takes focus next; do not pull it back to the row.
             if (confirmingDelete || pickingSnooze) event.preventDefault();
-            if (!renameAfterClose.current) return;
-            renameAfterClose.current = false;
+            const rename = renameAfterClose.current;
+            if (!rename) return;
+            renameAfterClose.current = null;
             // Hand focus to the editor after the menu releases its focus scope.
             event.preventDefault();
-            void run("rename");
+            rename();
           }}
           className="z-50 min-w-44 rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md"
         >
+          <PluginGroups groups={pluginGroups} before={GROUPS.open} />
+          <PluginItems entries={pluginGroups.get(GROUPS.open)?.leading} />
           <Item onSelect={() => void run("split")}>Open in split</Item>
           <ParentThreadMenu thread={thread} />
           {notifiesParent(thread) ? (
@@ -159,7 +168,10 @@ function RowMenuContents({
               </ContextMenu.Portal>
             </ContextMenu.Sub>
           ) : null}
+          <PluginItems entries={pluginGroups.get(GROUPS.open)?.trailing} />
+          <PluginGroups groups={pluginGroups} after={GROUPS.open} before={GROUPS.state} />
           {hasPinLifecycleItems ? <Separator /> : null}
+          <PluginItems entries={pluginGroups.get(GROUPS.state)?.leading} />
           {thread.isPinned || thread.parentThreadId == null ? (
             <Item icon={thread.isPinned ? "PinOff" : "Pin"} onSelect={() => void togglePin()}>
               {thread.isPinned ? "Unpin" : "Pin"}
@@ -188,26 +200,34 @@ function RowMenuContents({
               Un-settle
             </Item>
           ) : null}
+          <PluginItems entries={pluginGroups.get(GROUPS.state)?.trailing} />
+          <PluginGroups groups={pluginGroups} after={GROUPS.state} before={GROUPS.organize} />
           <Separator />
+          <PluginItems entries={pluginGroups.get(GROUPS.organize)?.leading} />
           {onRename ? (
             <Item
               onSelect={() => {
-                renameAfterClose.current = true;
+                renameAfterClose.current = () => void run("rename");
               }}
             >
               Rename
             </Item>
           ) : null}
           <Item onSelect={() => void run("read")}>{thread.isUnread ? "Mark read" : "Mark unread"}</Item>
+          <PluginItems entries={pluginGroups.get(GROUPS.organize)?.trailing} />
           <Separator />
           <CopySubmenu thread={thread} onCopyLink={() => void run("copyLink")} />
+          <PluginGroups groups={pluginGroups} after={GROUPS.organize} before={GROUPS.lifecycle} />
           <Separator />
+          <PluginItems entries={pluginGroups.get(GROUPS.lifecycle)?.leading} />
           <Item disabled={!canArchive} onSelect={() => void run("archive")}>
             Archive
           </Item>
           <Item destructive onSelect={() => setConfirmingDelete(true)}>
             Delete
           </Item>
+          <PluginItems entries={pluginGroups.get(GROUPS.lifecycle)?.trailing} />
+          <PluginGroups groups={pluginGroups} after={GROUPS.lifecycle} />
         </ContextMenu.Content>
       </ContextMenu.Portal>
       <DeleteThreadDialog thread={thread} open={confirmingDelete} onOpenChange={setConfirmingDelete} />
@@ -215,6 +235,87 @@ function RowMenuContents({
         <SnoozePickerDialog open={pickingSnooze} onOpenChange={setPickingSnooze} onSnooze={onSnooze} />
       ) : null}
     </>
+  );
+}
+
+/** bb's groups that this menu's own sections stand for, in menu order. */
+const SECTION_GROUPS: readonly string[] = [GROUPS.open, GROUPS.state, GROUPS.organize, GROUPS.lifecycle];
+
+/** bb's native thread list moves threads between its sections, which this sidebar does not draw. */
+const MOVE_TO_SECTION = "thread-list/move";
+
+/**
+ * Other plugins' thread actions in one group, in bb's menu order: those bb
+ * sorts before the group's first own action, and those after it.
+ */
+interface PluginSection {
+  leading: PluginThreadActionEntry[];
+  trailing: PluginThreadActionEntry[];
+}
+
+/** bb's own actions are this menu's items; the rest go to the section of their group. */
+function groupPluginActions(actions: readonly PluginThreadActionEntry[]) {
+  const groups = new Map<string, PluginSection>();
+  const groupsWithCore = new Set<string>();
+  for (const entry of actions) {
+    if (entry.key === MOVE_TO_SECTION) continue;
+    const section = groups.get(entry.group);
+    if (entry.pluginId === "bb--core") {
+      if (section && !groupsWithCore.has(entry.group)) section.leading = section.trailing.splice(0);
+      groupsWithCore.add(entry.group);
+    } else if (section) section.trailing.push(entry);
+    else groups.set(entry.group, { leading: [], trailing: [entry] });
+  }
+  return groups;
+}
+
+/**
+ * Groups that are not one of this menu's sections, each a section of its own
+ * between `after` and `before`, as bb places a group where it sorts.
+ */
+function PluginGroups({
+  groups,
+  after,
+  before,
+}: {
+  groups: ReadonlyMap<string, PluginSection>;
+  after?: string;
+  before?: string;
+}) {
+  return [...groups]
+    .filter(
+      ([group]) =>
+        !SECTION_GROUPS.includes(group) &&
+        (after === undefined || group > after) &&
+        (before === undefined || group < before),
+    )
+    .map(([group, { leading, trailing }]) => (
+      <Fragment key={group}>
+        {after === undefined ? null : <Separator />}
+        <PluginItems entries={[...leading, ...trailing]} />
+        {after === undefined ? <Separator /> : null}
+      </Fragment>
+    ));
+}
+
+function PluginItems({ entries = [] }: { entries?: readonly PluginThreadActionEntry[] }) {
+  return entries.map(({ key, action }) =>
+    action.choices ? (
+      <ThreadActionChoices key={key} action={action} />
+    ) : (
+      <Item
+        key={key}
+        bbIcon={action.icon}
+        destructive={action.variant === "destructive"}
+        disabled={action.disabled}
+        onSelect={() => void action.run()}
+      >
+        <span className="flex min-w-0 flex-col">
+          <span>{action.label}</span>
+          {action.detail ? <span className="text-muted-foreground">{action.detail}</span> : null}
+        </span>
+      </Item>
+    ),
   );
 }
 
@@ -312,6 +413,7 @@ function SnoozeSubmenu({
 function Item({
   children,
   icon,
+  bbIcon,
   destructive = false,
   disabled = false,
   title,
@@ -319,6 +421,8 @@ function Item({
 }: {
   children: ReactNode;
   icon?: IconName;
+  /** A bb icon name, for another plugin's action. */
+  bbIcon?: string;
   destructive?: boolean;
   disabled?: boolean;
   title?: string;
@@ -337,6 +441,7 @@ function Item({
       )}
     >
       {icon ? <Icon name={icon} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
+      {bbIcon ? <BbIcon name={bbIcon} className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" /> : null}
       {children}
     </ContextMenu.Item>
   );

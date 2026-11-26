@@ -4,6 +4,7 @@
 
 ### Added
 
+- The row's right-click menu shows thread actions that other plugins add, such as bb's thread notifications, each in the section of its group. bb's native thread list's Move to section stays out, because Thread Inbox does not show those sections.
 - A "BB compat" workflow that runs the type check and scratch smoke test daily against the latest stable BB and reports a failure in a `bb-compat` issue.
 
 ### Changed

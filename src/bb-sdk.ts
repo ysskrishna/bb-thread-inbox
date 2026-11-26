@@ -34,6 +34,9 @@ export {
   // bb's own thread-status rule. bb 0.49.0, the minimum host (engines.bb),
   // ships it, so it has no fallback.
   experimental_resolveThreadStatus as resolveThreadStatus,
+  // bb 0.49.0, the minimum host (engines.bb), ships both, so they have no fallback.
+  experimental_Icon as BbIcon,
+  experimental_THREAD_ACTION_GROUPS as THREAD_ACTION_GROUPS,
 } from "@get-bb/plugin-sdk/app";
 
 /** Props bb passes to a thread header action. */
