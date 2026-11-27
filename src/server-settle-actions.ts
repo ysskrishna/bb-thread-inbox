@@ -31,6 +31,8 @@ export function createServerSettleActions(ctx: ServerContext, lifecycle: ReturnT
       settledAt: number;
       expiresAt: number;
       previous: Array<{ threadId: string; parentThreadId: string | null; row: StoredLifecycleRow | null }>;
+      /** Read times Settle gave threads that were unread, so Undo can make them unread again. */
+      markedRead: Map<string, number | null>;
     }
   >();
   ctx.bb.onDispose(() => settleUndos.clear());
@@ -49,7 +51,7 @@ export function createServerSettleActions(ctx: ServerContext, lifecycle: ReturnT
       const ids = new Set(threadTreeIds(allThreads, threadId));
       const tree = allThreads.filter((thread) => ids.has(thread.id));
       if (!tree.some((thread) => thread.id === threadId)) throw new Error("Thread is no longer available");
-      const { now, previous } = await withThreadChanges([...ids], async () => {
+      const { now, previous, unread } = await withThreadChanges([...ids], async () => {
         const busy = tree.find((thread) => !canPark(threadSignals(thread)));
         if (busy) throw new Error(`Cannot settle while ${threadStoredTitle(busy)} is working or waiting for input`);
         const beforeRows = new Map(tree.map((thread) => [thread.id, readOne(thread.id)]));
@@ -98,7 +100,8 @@ export function createServerSettleActions(ctx: ServerContext, lifecycle: ReturnT
             })),
           );
           publishLifecycleChanges(currentTree.map((thread) => thread.id));
-          return { now, previous };
+          const unread = currentTree.filter((thread) => threadSignals(thread).isUnread).map((thread) => thread.id);
+          return { now, previous, unread };
         } catch (error) {
           const failed: string[] = [];
           for (const original of unpinned.reverse()) {
@@ -127,12 +130,28 @@ export function createServerSettleActions(ctx: ServerContext, lifecycle: ReturnT
           throw error;
         }
       });
+      // Settled work is filed, so bb no longer counts it as a notification.
+      const markedRead = new Map<string, number | null>();
+      for (const id of unread) {
+        try {
+          const { lastReadAt } = await ctx.bb.sdk.threads.markRead({ threadId: id });
+          markedRead.set(id, lastReadAt);
+        } catch (error) {
+          ctx.bb.log.warn(`Settled ${id} but could not mark it read: ${errorMessage(error)}`);
+        }
+      }
       const undoToken = randomUUID();
       for (const [token, undo] of settleUndos) {
         if (undo.expiresAt <= Date.now()) settleUndos.delete(token);
       }
       while (settleUndos.size >= 50) settleUndos.delete(settleUndos.keys().next().value!);
-      settleUndos.set(undoToken, { threadId, settledAt: now, expiresAt: Date.now() + 5 * 60_000, previous });
+      settleUndos.set(undoToken, {
+        threadId,
+        settledAt: now,
+        expiresAt: Date.now() + 5 * 60_000,
+        previous,
+        markedRead,
+      });
       return { ok: true, reclaim: { ...EMPTY_RECLAIM }, undoToken };
     },
     async unsettle({ threadId, undoToken }) {
@@ -163,6 +182,15 @@ export function createServerSettleActions(ctx: ServerContext, lifecycle: ReturnT
         })();
         settleUndos.delete(undoToken);
         publishLifecycleChanges(restored);
+        for (const id of restored) {
+          // A thread read again since Settle keeps that read.
+          if (!undo.markedRead.has(id) || tree.get(id)?.lastReadAt !== undo.markedRead.get(id)) continue;
+          try {
+            await ctx.bb.sdk.threads.markUnread({ threadId: id });
+          } catch (error) {
+            ctx.bb.log.warn(`Undid Settle of ${id} but could not mark it unread: ${errorMessage(error)}`);
+          }
+        }
         return { ok: true };
       }
       const threads = await loadPolicyThreads(true);

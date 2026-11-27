@@ -115,15 +115,24 @@ test("snooze moves to Snoozed and wake returns to Active", async ({ page, reques
 });
 
 test("settle moves to Settled and Undo restores Active", async ({ page, request }) => {
+  const unread = async () => {
+    const { thread } = await cli(["thread", "get", cedar.id]);
+    return thread.lastReadAt === null || thread.latestAttentionAt > thread.lastReadAt;
+  };
+  // A finished thread nobody opened is a notification until Settle files it.
+  await cli(["thread", "unread", cedar.id]);
+  await page.reload();
   await (await menu(page, cedar.title)).getByRole("menuitem", { name: "Settle", exact: true }).click();
   await expect(shelf(page, "Settled")).toBeVisible();
   await expand(page, "Settled");
   await expect(link(page, cedar.title, "Settled")).toBeVisible();
   await expect(link(page, cedar.title)).toHaveCount(0);
   expect((await rpc(request, "listLifecycle")).rows.find((row) => row.threadId === cedar.id).settledAt).not.toBeNull();
+  await expect.poll(unread).toBe(false);
   await page.getByRole("button", { name: "Undo", exact: true }).click();
   await expect(link(page, cedar.title)).toBeVisible();
   expect((await rpc(request, "listLifecycle")).rows.find((row) => row.threadId === cedar.id).settledAt).toBeNull();
+  await expect.poll(unread).toBe(true);
 });
 
 test("right-click menu matches the sidebar action list", async ({ page, context }) => {

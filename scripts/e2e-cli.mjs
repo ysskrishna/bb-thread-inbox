@@ -80,6 +80,16 @@ try {
     expect((await sidebar(["resume", "--thread", b.id])).code === 0, "resume exit");
     expect((await shelves()).get(b.id).shelf === "active", "not active");
   });
+  await step("settle clears an unread thread's notification", async () => {
+    const get = async () => JSON.parse((await server.cli(["thread", "get", a.id, "--json"])).stdout).thread;
+    const unread = (thread) => thread.lastReadAt === null || thread.latestAttentionAt > thread.lastReadAt;
+    await server.cli(["thread", "unread", a.id, "--json"]);
+    expect(unread(await get()), "fixture is not unread");
+    expect((await sidebar(["settle", "--thread", a.id])).code === 0, "settle exit");
+    const after = await get();
+    expect(!unread(after), `still unread after settle: ${JSON.stringify(after)}`);
+    expect((await sidebar(["resume", "--thread", a.id])).code === 0, "resume exit");
+  });
   await step("park and resume", async () => {
     expect((await sidebar(["park", "--thread", c.id])).code === 0, "park exit");
     expect((await shelves()).get(c.id).shelf === "parked", "not parked");

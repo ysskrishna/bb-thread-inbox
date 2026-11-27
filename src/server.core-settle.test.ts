@@ -79,3 +79,38 @@ it("wakes auto-settled work on new attention without a PR lookup", async () => {
   expect(await harness.behavior.callRpc("listLifecycle", {})).toEqual({ rows: [] });
   expect(batches).toEqual([["env_quiet"]]);
 });
+
+async function settleSetup(lastReadAt: number | null) {
+  const thread = projectThread({ id: "done", lastReadAt, latestAttentionAt: 50 });
+  const { bb, harness } = createFakePluginHost({
+    pluginId: "bb-thread-inbox",
+    sdk: {
+      projects: { list: async () => projectsWith([thread]) },
+      threads: {
+        list: async () => [thread],
+        get: async () => makeThreadResponse(thread),
+        markRead: async () => makeThreadResponse(Object.assign(thread, { lastReadAt: 60 })),
+        markUnread: async () => makeThreadResponse(Object.assign(thread, { lastReadAt: null })),
+      },
+    },
+  });
+  await plugin(bb);
+  disposers.push(() => harness.lifecycle.dispose());
+  return harness;
+}
+
+it("settling a finished thread nobody opened clears its unread notification, and Undo restores it", async () => {
+  const harness = await settleSetup(null);
+  const { undoToken } = (await harness.behavior.callRpc("settle", { threadId: "done" })) as { undoToken: string };
+  expect(harness.inspection.sdk.callsTo("threads.markRead")).toEqual([[{ threadId: "done" }]]);
+  await harness.behavior.callRpc("unsettle", { threadId: "done", undoToken });
+  expect(harness.inspection.sdk.callsTo("threads.markUnread")).toEqual([[{ threadId: "done" }]]);
+});
+
+it("settling an already read thread leaves its read state alone, through Undo too", async () => {
+  const harness = await settleSetup(50);
+  const { undoToken } = (await harness.behavior.callRpc("settle", { threadId: "done" })) as { undoToken: string };
+  await harness.behavior.callRpc("unsettle", { threadId: "done", undoToken });
+  expect(harness.inspection.sdk.callsTo("threads.markRead")).toHaveLength(0);
+  expect(harness.inspection.sdk.callsTo("threads.markUnread")).toHaveLength(0);
+});
